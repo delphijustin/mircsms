@@ -164,7 +164,7 @@ shellexecutea(hw,nil,'rundll32.exe','libmIRCSMS.dll,restart /CRASH',NIL,NSHOW);
 end;
 exitprocess(ec);
 end;
-procedure helpA(hw:hwnd;inst:hinst;topic:pansichar;nShow:integer);stdcall;
+procedure helpA(hw:hwnd;inst:hinst;name:pansichar;nShow:integer);stdcall;
 begin
 messageboxa(hw,pansichar(
 'Usage: rundll32 libmIRCSMS.dll,<commandname> "Parameters"'#13#10+

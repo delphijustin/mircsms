@@ -50,7 +50,6 @@ PSMSSpeedMenu=^TSMSSpeedMenu;
     Nocropping1: TMenuItem;
     BuyMoreCredits1: TMenuItem;
     ViewLastMessage1: TMenuItem;
-    BlacklistedKeywords1: TMenuItem;
     viaPayPal1: TMenuItem;
     viaCashApp1: TMenuItem;
     Makemessagetofitintoonetextmessage1: TMenuItem;
@@ -74,6 +73,8 @@ PSMSSpeedMenu=^TSMSSpeedMenu;
     CopyKeyToClipboard1: TMenuItem;
     mIRCDelay1: TMenuItem;
     IncomingSMSDelay1: TMenuItem;
+    DailyQuotaLimit1: TMenuItem;
+    Timer4: TTimer;
     procedure FormCreate(Sender: TObject);
     procedure Timer1Timer(Sender: TObject);
     procedure FormClose(Sender: TObject; var Action: TCloseAction);
@@ -91,7 +92,6 @@ PSMSSpeedMenu=^TSMSSpeedMenu;
     procedure About1Click(Sender: TObject);
     procedure BuyMoreCredits1Click(Sender: TObject);
     procedure ViewLastMessage1Click(Sender: TObject);
-    procedure BlacklistedKeywords1Click(Sender: TObject);
     procedure Cropping(Sender: TObject);
     procedure viaPayPal1Click(Sender: TObject);
     procedure viaCashApp1Click(Sender: TObject);
@@ -109,6 +109,8 @@ PSMSSpeedMenu=^TSMSSpeedMenu;
     procedure Button1Click(Sender: TObject);
     procedure CopyKeyToClipboard1Click(Sender: TObject);
     procedure mIRCDelay1Click(Sender: TObject);
+    procedure Timer4Timer(Sender: TObject);
+    procedure DailyQuotaLimit1Click(Sender: TObject);
   private
 choice:string;
   lastbuff:array[0..2048]of ansichar;
@@ -125,21 +127,26 @@ choice:string;
   function getProto:dword;
   function getPhone:int64;
   function getquotaEnabled:boolean;
+  function gettquota:dword;
+  procedure settquota(x:dword);
   procedure setquotaenabled(b:boolean);
   procedure setkey(APIKey:string);
   function getkey:string;
   function getbEncoding:Boolean;
   procedure setbEncoding(b:boolean);
+  function getdaily:dword;
+  procedure setdaily(x:dword);
   function getquota:DWORD;
     { Private declarations }
   public
-  regkey,cache,favkey:HKey;
+  watchlist,regkey,cache,favkey:HKey;
   mIRC:TmIRCControl;
   targetQ:string;
   CropMode,firstTime:dword;
   smscommands,json:tstringlist;
   textbeltWorks:boolean;
   startTime:tdatetime;
+  property dailylimit:dword read getdaily write setdaily;
   function FormatSMS(msg:string):string;
   property QuotaPaused:boolean read getquotaenabled write setquotaenabled;
   procedure writelog(const func,msg:string;whatToUse:dword=error_use_default);
@@ -148,14 +155,17 @@ choice:string;
   property LastMSG:string read getlastmsg write setlastmsg;
   property NoEncodingURLs:boolean read getbEncoding write setbEncoding;
   procedure mIRCExec(const sms:string);
+  procedure processmIRC(const targetq:string);
   property Quota:DWORD read getquota write setquota;
   property Protocol:dword read getproto write setproto;
+  property TodayQuota:dword read gettquota write settquota;
   function protocols(dwPort:dword):string;
   property phone:int64 read getphone write setphone;
   property ConfigVersion:dword read regchkconfig;
   property textbeltKey:string read getkey write setkey;
-  function sendSMS(msg:string):TStringlist;
+  function sendSMS(msg:string;watchId:pansichar=nil):TStringlist;
   property MinQuota:DWORD read getqlimit write setqlimit;
+  function GetTargets:TStringlist;
     { Public declarations }
   end;
   TSMSBotFunction=function(args:tstringlist;bot:tsmsbot):string;
@@ -166,6 +176,34 @@ implementation
 
 {$R *.DFM}
 
+procedure tsmsbot.settquota;
+var dw:dword;
+begin
+dw:=x;
+regsetvalueexa(cache,'TodayQuota',0,reg_dword,@dw,4);
+end;
+
+function tsmsbot.gettquota;
+var rs:dword;
+begin
+rs:=4;result:=0;
+regqueryvalueexa(cache,'TodayQuota',nil,nil,@result,@rs);
+end;
+
+procedure tsmsbot.setdaily;
+var daily:dword;
+begin
+daily:=x;
+regsetvalueexa(regkey,'DailyLimit',0,reg_dword,@daily,4);
+end;
+
+function tsmsbot.getdaily;
+var rs:dword;
+begin
+rs:=4;result:=maxlong;
+regqueryvalueexa(regkey,'DailyLimit',nil,nil,@result,@rs);
+end;
+
 procedure tsmsbot.setQCmd;
 var buff:array[0..2048]of ansichar;
 begin
@@ -173,6 +211,21 @@ regsetvalueexa(regkey,'OnLowQuota',0,reg_expand_sz,strplcopy(buff,cmd,2048),1+
 length(cmd));
 end;
 
+function tsmsbot.GetTargets;
+var ns,ind:dword;
+nam:array[byte]of ansichar;
+begin
+ind:=0;
+ns:=256;
+nam[0]:=#0;
+result:=tstringlist.Create;
+while regenumvalue(watchlist,ind,nam,ns,nil,nil,nil,nil)=error_success do begin
+result.Append(nam);
+ns:=256;
+strpcopy(nam,'/');
+inc(ind);
+end;
+end;
 procedure tsmsbot.setbEncoding;
 begin
 if b then regsetvalueexa(regkey,'NoEncodingURLs',0,reg_binary,nil,0)else
@@ -328,55 +381,17 @@ case cropmode of
 1:result:=result;
 end;
 end;
+function unwatch(args:tstringlist;bot:tsmsbot):string;
+var wname:array[byte]of ansichar;
+begin
+result:=syserrormessage(error_invalid_parameter);
+if args.Count<>2then exit;
+result:='';
+regdeletevaluea(bot.watchlist,strpcopy(wname,args[1]));
+end;
 function sendQuota(args:tstringlist;bot:tsmsbot):string;
 begin
 result:=format('%u credits left',[bot.quota]);
-end;
-
-function blacklistCmd(args:tstringlist;bot:tsmsbot):string;
-var blacklist:array[0..2048]of ansichar;
-I:Integer;
-rErr:longint;
-rs,Found:dword;
-keywords:tstringlist;
-begin
-rs:=2049;found:=0;
-blacklist[0]:=#0;
-args.Delete(0);
-regqueryvalueexa(bot.regkey,'BlackList',nil,nil,@blacklist,@rs);
-if args.Count=0 then begin
-result:=format('Keywords: %s',[blacklist]);
-exit;
-end;
-if args.IndexOf('/block')>-1then begin keywords:=tstringlist.Create;
-args.Delete(args.indexof('/block'));keywords.CommaText:=blacklist;
-for I:=0to args.Count-1do begin
-if keywords.IndexOf(args[i])=-1then keywords.Append(args[i])else
-inc(found);
-strplcopy(blacklist,keywords.CommaText,2048);
-rerr:=regsetvalueexa(bot.regkey,'BlackList',0,reg_sz,@blacklist,1+strlen(blacklist));
-if rerr=error_success then
-result:=format('Added %u out of %u keyword(s)',[args.count-found,args.count])else
-result:=syserrormessage(rerr);
-keywords.Free;
-exit;
-end;
-if args.IndexOf('/unblock')>-1then
-begin
-Args.Delete(args.indexof('/unblock'));
-keywords:=tstringlist.Create;keywords.CommaText:=blacklist;
-for I:=0to args.Count-1do
-if keywords.IndexOf(args[i])>-1then begin
-inc(found);keywords.Delete(keywords.IndexOf(args[i]));end;
-strplcopy(blacklist,keywords.CommaText,2048);
-rerr:=regsetvalueexa(bot.regkey,'BlackList',0,reg_sz,@blacklist,1+strlen(blacklist));
-if rerr=error_success then
-result:=format('Deleted %u out of %u keyword(s)',[found,args.count])else
-result:=syserrormessage(rerr);
-exit;
-end;
-end;
-result:=syserrormessage(error_invalid_parameter);
 end;
 
 function getNicks(args:tstringlist;bot:tsmsbot):string;
@@ -399,16 +414,25 @@ end;
 function tsmsbot.sendSMS;
 var mparams:array[0..2048]of ansichar;
 fn:array[0..max_path]of ansichar;
+tar:string;
 buff,textid:array[byte]of ansichar;
 error:hresult;
 sms,sl:tstringlist;
 begin
+try
 result:=tstringlist.Create;
 sl:=tstringlist.Create;
-if ismIRCStatus(msg)or isfromnick(mirc.MyNick,msg) then begin sl.free; exit;end;
-try
+if((dailylimit<maxlong)and(todayquota>dailylimit))or ismIRCStatus(msg)or
+isfromnick(mirc.MyNick,msg) then begin sl.free; exit;end;
+if dailylimit<maxlong then begin todayquota:=todayquota+1;
+if todayquota>=dailylimit then begin sl.Free;
+sendsms('Daily Quota reached type @enable to chat');quotapaused:=true;exit;
+end;
+end;
+tar:='';
+if watchid<>nil then tar:=strpas(watchid)+' ';
 error:=urldownloadtocachefilea(nil,strplcopy(mparams,
-protocols(protocol)+'://textbelt.com/text?message='+httpencode(formatsms(msg))+
+protocols(protocol)+'://textbelt.com/text?message='+httpencode(formatsms(tar+msg))+
 '&phone='+inttostr(phone)+'&replyWebhookUrl='+httpencode(outbox_url)+'&key='+
 textbeltkey+'&now='+floattostr(now),2048),fn,max_path,0,nil);
 if fileexists(fn)then begin
@@ -426,7 +450,7 @@ fn,changefileext(forms.application.exename,'.log')));
 end;
 if(pos(format(textbelt_url_error,[textbeltkey]),sl.Text)>0)and(not NoEncodingURLs)then
 begin
-sl:=sendsms(stringreplace(stringreplace(httpencode(msg),'.','%2E',[rfreplaceall])
+sl:=sendsms(tar+stringreplace(stringreplace(httpencode(msg),'.','%2E',[rfreplaceall])
 ,'+',#32,[rfreplaceall]));
 result.AddStrings(sl);
 result.Values['Sent']:=msg;
@@ -479,12 +503,15 @@ shellexecutea(0,nil,'rundll32.exe',rundllparam,nil,sw_show);
 end;
 
 function query(args:tstringlist;bot:tsmsbot):String;
+var target:array[byte]of ansichar;
 begin
 case args.Count of
 1:result:=bot.targetq;
 2:begin bot.targetQ:=args[1];bot.mIRC.Command('/query '+args[1],1);end;
 else result:=syserrormessage(error_invalid_parameter);
 end;
+if result<>syserrormessage(error_invalid_parameter)then exit;
+regsetvalueexa(bot.watchlist,strplcopy(target,bot.targetq,255),0,reg_sz,nil,0);
 end;
 function line(args:tstringlist;bot:tsmsbot):string;
 begin
@@ -541,8 +568,11 @@ if args.Count<>2then exit;result:='';sleep(strtointdef(args[1],2500));
 end;
 function join(args:tstringlist;bot:tsmsbot):String;
 var I:Integer;
+target:array[byte]of ansichar;
 begin
-for I:=1to args.Count-1do begin bot.mIRC.Join(args[i]);bot.targetQ:=args[i];end;
+for I:=1to args.Count-1do begin bot.mIRC.Join(args[i]);bot.targetQ:=args[i];
+regsetvalueexa(bot.watchlist,strplcopy(target,args[i],255),0,reg_sz,nil,0);
+end;
 end;
 function favproc(args:tstringlist;bot:tsmsbot):String;
 var scriptc:tstringlist;
@@ -598,7 +628,7 @@ end;
 function enable(args:tstringlist;bot:tsmsbot):String;
 begin
 bot.quotapaused:=false;
-bot.Quota:=maxdword;
+bot.Quota:=maxlong;
 result:='Texting is enabled and quotas are reset';
 end;
 procedure TSMSBot.FormCreate(Sender: TObject);
@@ -606,7 +636,7 @@ var hw:hwnd;
 cmd:array[byte]of ansichar;
 I:integer;
 lpSpeed:PSMSSpeedMenu;
-cv,pid,rs,ns,dwdelay:dword;
+cv,pid,rs,ns,watchlistStat,dwdelay:dword;
 targetr:array[0..32]of ansichar;
 exepath:array[0..max_path]of ansichar;
 label reconfigure,setChannel,setTextbelt;
@@ -622,7 +652,7 @@ smscommands.Sorted:=true;
 smscommands.AddObject('@if',TObject(@ifequal));
 smscommands.AddObject('@delay',tobject(@delay));
 smscommands.AddObject('@enable',tobject(@enable));
-smscommands.AddObject('@blacklist',tobject(@blacklistcmd));
+smscommands.AddObject('@unwatch',tobject(@unwatch));
 smscommands.AddObject('@quit',tobject(@quit));
 smscommands.AddObject('@add',tobject(@favproc));
 smscommands.addobject('@join',tobject(@join));
@@ -699,6 +729,10 @@ rs:=4;
 regqueryvalueexa(regkey,'CropMode',nil,nil,@cropmode,@rs);
 Makemessagetofitintoonetextmessage1.Checked:=(0=cropmode);
 nocropping1.Checked:=(1=cropmode);
+regcreatekeyexa(regkey,'Watchlist',0,nil,reg_option_non_volatile,key_all_access,
+nil,watchlist,@watchlistStat);
+if watchliststat=reg_created_new_key then
+regsetvalueex(watchlist,targetr,0,reg_sz,nil,0);
 memo1.text:=datetimetostr(now)+' - Started';
 mIRC.active:=true;
 shellexecutea(0,nil,'rundll32.exe',strfmt(cmd,'libmIRCSMS.DLL,InboxService %d',[
@@ -723,11 +757,35 @@ starttime:=now;
 timer1.Interval:=dwdelay;
 timer2.enabled:=true;
 timer1.enabled:=true;
+timer4.Interval:=24*60*60000;
+timer4.Enabled:=true;
+end;
+
+procedure tsmsbot.processmIRC(const targetq:string);
+var response:TStringlist;
+rs:dword;
+wname:array[byte]of ansichar;
+lastmsg:array[0..2048]of ansichar;
+begin
+lastmsg[0]:=#0;
+rs:=2049;
+regqueryvalueexa(watchlist,strplcopy(wname,targetq,255),nil,nil,@lastmsg,@rs);
+if(comparetext(lastmsg,mIRC.getlastline(wname))=0)or(quota<minquota)or(length(
+mirc.getlastline(wname))=0)then exit;
+strpcopy(lastmsg,mIRC.getlastline(targetQ));
+regsetvalueexa(watchlist,wname,0,reg_sz,@lastmsg,1+strlen(lastmsg));
+memo1.Text:=datetimetostr(now);
+response:=sendsms(lastmsg,wname);
+memo1.Lines.AddStrings(response);
+if(memo1.Lines.Count<2) then exit;
+if response.Count=0then exit;
+response.Free;
+if json.IndexOf('success')>-1then if(comparetext(json[json.indexof('success')+1],
+':false')=0)then writelog('textBelt',json.commatext,error_use_file);
+
 end;
 procedure TSMSBot.Timer1Timer(Sender: TObject);
-var response,blist:TStringlist;
-blacklist:array[0..2048]of ansichar;
-rs:dword;
+var mircTargets:tstringlist;
 I:integer;
 begin
 try
@@ -738,30 +796,14 @@ sendsms(format('You only have %u credits left, to turn on texting type @enable',
 if length(QuotaCommand)>0then mircexec(quotacommand);
 exit;
 end;
-if(lastmsg=mIRC.getlastline(targetQ))or(quota<minquota)or(length(
-mirc.getlastline(targetq))=0)then exit;
-lastmsg:=mIRC.getlastline(targetQ);
-rs:=2049;
-blacklist[0]:=#0;
-regqueryvalueex(regkey,'Blacklist',nil,nil,@blacklist,@rs);
-blist:=tstringlist.Create;
-blist.CommaText:=lowercase(blacklist);
-for i:=0to blist.Count-1do if pos(lowercase(lastmsg),blist[i])>0then begin
-memo1.Lines.Append(format('Blacklisted "%s" found',[blist[i]]));blist.Free;exit;
-end;
-blist.Free;
-memo1.Text:=datetimetostr(now);
-response:=sendsms(lastmsg);
-memo1.Lines.AddStrings(response);
-if(memo1.Lines.Count<2) then exit;
-if response.Count=0then exit;
-response.Free;
-if json.IndexOf('success')>-1then if(comparetext(json[json.indexof('success')+1],
-':false')=0)then writelog('textBelt',json.commatext,error_use_file);
+mirctargets:=gettargets;
+for I:=0to mirctargets.Count-1do
+processmirc(mirctargets[I]);
 except on e:exception do writelog(e.classname,e.message);end;
 end;
 procedure TSMSBot.FormClose(Sender: TObject; var Action: TCloseAction);
 begin
+regclosekey(watchlist);
 regclosekey(favkey);
 regclosekey(cache);
 regclosekey(regkey);
@@ -911,17 +953,6 @@ messagebox(0,pchar(httpdecode(formatsms(lastmsg))),'Last Message',
 mb_iconinformation);
 end;
 
-procedure TSMSBot.BlacklistedKeywords1Click(Sender: TObject);
-var blacklist:array[0..2048]of ansichar;
-rs:dword;
-begin
-rs:=2049;
-regqueryvalueexa(regkey,'BlackList',nil,nil,@blacklist,@rs);
-strplcopy(blacklist,inputbox('Blacklist',
-'Enter nicknames/keywords to block seperated by commas',blacklist),2048);
-regsetvalueexa(regkey,'BlackList',0,reg_sz,@blacklist,1+strlen(blacklist));
-end;
-
 procedure TSMSBot.Cropping(
   Sender: TObject);
 begin
@@ -942,7 +973,7 @@ end;
 
 procedure TSMSBot.viaCashApp1Click(Sender: TObject);
 begin
-shellexecute(0,nil,'https://cash.app/$delphijustin/5',nil,nil,sw_normal);
+shellexecute(0,nil,'https://cash.app/delphijustin/5',nil,nil,sw_normal);
 end;
 
 procedure TSMSBot.ViewLastPhoneNumber1Click(Sender: TObject);
@@ -1044,6 +1075,23 @@ regqueryvalueexa(regkey,speedobj.valuename,nil,nil,@dw,@rs);
 dw:=strtointdef(inputbox(tmenuitem(sender).caption,
 'Enter the interval in milliseconds',inttostr(dw)),dw);
 regsetvalueexa(regkey,speedobj.valuename,0,reg_dword,@dw,4);
+end;
+
+procedure TSMSBot.Timer4Timer(Sender: TObject);
+begin
+if(dailylimit=maxlong)or(todayquota<dailylimit)then exit;
+quotapaused:=false;
+todayquota:=0;
+sendsms('Texting is enabled and quotas are reset');
+end;
+
+procedure TSMSBot.DailyQuotaLimit1Click(Sender: TObject);
+var strDaily:string;
+begin
+strDaily:='none';
+if dailylimit<maxlong then strdaily:=inttostr(dailylimit);
+dailylimit:=strtointdef(inputbox('Daily Limit','Enter daily quota limit',strdaily)
+,maxlong);
 end;
 
 end.

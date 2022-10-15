@@ -137,7 +137,7 @@ sleep(1000);
 until(trys<0)and(FindWindow('mIRC',nil)<>0);
 zeromemory(@smsbot,sizeof(smsbot));
 smsbot.cbSize:=sizeof(smsbot);
-smsbot.lpFile:=allocmem(max_path+1);
+smsbot.lpFile:=strcopy(allocmem(max_path+1),'mircsms.exe');
 rs:=max_path+1;
 regqueryvalueex(appkey,'EXEPath',nil,nil,pointer(smsbot.lpfile),@rs);
 rs:=2049;

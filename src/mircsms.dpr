@@ -3,7 +3,7 @@ program mircsms;
 uses
   Forms,
   smsUnit1 in 'smsUnit1.pas' {SMSBot},
-  mIRCc in '..\delphi4\TmIRCControl\mIRCc.pas';
+  mIRCc in '..\include\mIRCc.pas';
 
 {$R *.RES}
 
